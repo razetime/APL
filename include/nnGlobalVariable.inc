@@ -1,0 +1,25 @@
+//Register target
+vector <int> shape;
+vector <int> perm;
+vector <int> size;
+vector <int> stride;
+vector <int> dilation;
+vector <int> padding;
+vector <float> value;
+vector <int> axes;
+vector <int> values;
+string label;
+string border;
+int groups;
+int axis;
+float alpha;
+float beta;
+float bias;
+float a, b;
+float scale, epsilon;
+bool trA,trB;
+bool transposeA,transposeB;
+int x,y;
+NNEF_RT::C C; 
+//NNEF_RT::CL CL;
+NNEF_RT::ANN ANN;
