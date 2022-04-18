@@ -1,0 +1,30 @@
+version 1.0;
+
+graph network(input_Placeholder) -> (output)
+{
+    input_Placeholder = external<scalar>(shape = [1, 784]);
+    variable = variable<scalar>(label = 'input/Variable', shape = [32, 1, 5, 5]);
+    reshape = reshape(input_Placeholder, shape = [-1, 28, 28, 1]);
+    variable_1 = variable<scalar>(label = 'input/Variable_1', shape = [1, 32]);
+    variable_2 = variable<scalar>(label = 'input/Variable_2', shape = [64, 32, 5, 5]);
+    variable_3 = variable<scalar>(label = 'input/Variable_3', shape = [1, 64]);
+    transpose_1 = transpose(reshape, axes = [0, 3, 1, 2]);
+    conv = conv(transpose_1, variable, variable_1, border = 'constant', dilation = [1, 1], groups = 1, padding = [], stride = [1, 1]);
+    relu = relu(conv);
+    max_pool = max_pool(relu, border = 'constant', dilation = [], padding = [], size = [1, 1, 2, 2], stride = [1, 1, 2, 2]);
+    conv_1 = conv(max_pool, variable_2, variable_3, border = 'constant', dilation = [1, 1], groups = 1, padding = [], stride = [1, 1]);
+    variable_7 = variable<scalar>(label = 'input/Variable_7', shape = [1, 10]);
+    relu_1 = relu(conv_1);
+    max_pool_1 = max_pool(relu_1, border = 'constant', dilation = [], padding = [], size = [1, 1, 2, 2], stride = [1, 1, 2, 2]);
+    transpose = transpose(max_pool_1, axes = [0, 2, 3, 1]);
+    variable_4 = variable<scalar>(label = 'input/Variable_4', shape = [3136, 1024]);
+    variable_6 = variable<scalar>(label = 'input/Variable_6', shape = [1024, 10]);
+    variable_5 = variable<scalar>(label = 'input/Variable_5', shape = [1, 1024]);
+    reshape_1 = reshape(transpose, shape = [-1, 3136]);
+    matmul = matmul(reshape_1, variable_4, transposeA = false, transposeB = false);
+    add = add(matmul, variable_5);
+    relu_2 = relu(add);
+    matmul_1 = matmul(relu_2, variable_6, transposeA = false, transposeB = false);
+    add_1 = add(matmul_1, variable_7);
+    output = softmax(add_1, axes = [1]);
+}

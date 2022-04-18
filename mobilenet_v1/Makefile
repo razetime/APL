@@ -1,15 +1,13 @@
 CXX = g++
-CXXFLAGS = 
+CXXFLAGS = -Wwrite-strings -Wunused-result -std=c++11 -ldl -Ofast -lpthread -ldl
 INC = -I ../include
 LIB = 
-
-all = mobilenetTest
 OBJS = nnlib.o
 
 
-all: mobilenet.cpp ${OBJS}
-	${CXX} mobilenet.cpp ${OBJS} ${CXXFLAGS} ${INC} -std=c++11 -ldl -Ofast -o mobilenetTest -lpthread -ldl
+mobilenetTest: mobilenet.cpp ${OBJS}
+	${CXX} ${CXXFLAGS} ${INC} -o $@ $^
 ${OBJS}: ../nnlib.c
-	${CXX} ../nnlib.c ${CXXFLAGS} -Wwrite-strings -ldl -Ofast -c -lpthread -ldl 
+	${CXX} -c $< ${CXXFLAGS} 
 clean:
 	rm -f mobilenetTest *.o *.out

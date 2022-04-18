@@ -1,9 +1,11 @@
 # APL
 Advanced Programming Language
 
-# How to 
+# How to run the benchmarks
 
-Running Steps:
+Steps:
+
+## Mobilenet_v1:
 
 	cd APL/mobilenet_v1
 	
@@ -16,6 +18,17 @@ Running Steps:
 	./mobilenetTest images/gold_fish_224.ppm
 	
 
-Operators:
+## LeNet_Mnist:
+
+	cd APL/LeNet_Mnist
+	
+	make clean
+	
+	make
+	
+	./mnistTest
+	
+
+# Operators:
 
 	APL/nnlib.c
