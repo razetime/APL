@@ -1,3 +1,8 @@
+#define CL_TARGET_OPENCL_VERSION 300
+extern "C" {
+#include <CL/opencl.h>
+}
+// #include <CL/cl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -6,6 +11,7 @@
 #include <assert.h>
 #include <math.h>
 #include <float.h>  //max_pool
+
 #define DEBUG_TIME
 #define im2colxGEMM
 
@@ -99,11 +105,11 @@ void variable(tensor * out, int n, int c, int h, int w, const char * label)
 	sprintf(file_name, "%s%s", label, ".dat");
     pFile = fopen ( file_name , "rb" );
 
-/*
-    string file_name(label);
-    file_name = file_name + ".dat";
-	pFile = fopen ( file_name.c_str() , "rb" );
-*/
+    /*
+        string file_name(label);
+        file_name = file_name + ".dat";
+        pFile = fopen ( file_name.c_str() , "rb" );
+    */
 	if (pFile==NULL) {fputs ("File error\n",stderr); assert (0);}
 
 	fseek(pFile, 0, SEEK_END);
@@ -280,6 +286,110 @@ void mul(tensor * out, tensor * in_x, float value)
         printf("[mul time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
 #endif
 }
+
+#define INSTEPS (512*512*512)
+#define ITERS (262144)
+
+// https://www.olcf.ornl.gov/tutorials/opencl-vector-addition/
+void cl_add(tensor* out, tensor* x, tensor* y) {
+    out = make_tensor(out, x->n, x->c, x->h, x->w);
+
+    // Host input vectors
+    double *h_a;
+    double *h_b;
+    // Host output vector
+    double *h_c;
+
+    // Device input buffers
+    cl_mem d_a;
+    cl_mem d_b;
+    // Device output buffer
+    cl_mem d_c;
+ 
+    cl_platform_id cpPlatform;        // OpenCL platform
+    cl_device_id device_id;           // device ID
+    cl_context context;               // context
+    cl_command_queue queue;           // command queue
+    cl_program program;               // program
+    cl_kernel kernel;                 // kernel
+
+    unsigned int n = 100000;
+    size_t bytes = n*sizeof(double);
+
+    int nsteps = INSTEPS;
+    int niters = ITERS;
+    size_t globalSize, localSize;
+    cl_int err;
+
+    // Number of work items in each local work group
+    localSize = 64;
+ 
+    // Number of total work items - localSize must be devisor
+    globalSize = nsteps/niters;
+
+    // Bind to platform
+    err = clGetPlatformIDs(1, &cpPlatform, NULL);
+ 
+    // Get ID for the device
+    err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+ 
+    // Create a context 
+    context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+ 
+    // Create a command queue
+    queue = clCreateCommandQueue(context, device_id, 0, &err);
+
+    // read kernel file
+    FILE *f = fopen("nnlib.cl","r");
+    fseek(f,0,SEEK_END);
+    size_t prg_size = ftell(f);
+    rewind(f);
+
+
+    // Create the compute program from the source buffer
+    char* prg_buffer = (char*)malloc(prg_size+1);
+    prg_buffer[prg_size] = '\0';
+    size_t plen = fread(prg_buffer,sizeof(char),prg_size,f);
+    printf("Program length: %lld",plen);
+    fclose(f);
+    program = clCreateProgramWithSource(context, 1,
+                            (const char **) &prg_buffer, NULL, &err);
+ 
+    // Build the program executable
+    clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+ 
+    // Create the compute kernel in the program we wish to run
+    kernel = clCreateKernel(program, "tensor_add", &err);
+
+    // Create the input and output arrays in device memory for our calculation
+    d_a = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
+    d_b = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
+    d_c = clCreateBuffer(context, CL_MEM_WRITE_ONLY, bytes, NULL, NULL);
+ 
+    // Write our data set into the input array in device memory
+    err = clEnqueueWriteBuffer(queue, d_a, CL_TRUE, 0,
+                                   bytes, h_a, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_b, CL_TRUE, 0,
+                                   bytes, h_b, 0, NULL, NULL);
+ 
+    // Set the arguments to our compute kernel
+    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_a);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_b);
+    err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &d_c);
+    err |= clSetKernelArg(kernel, 3, sizeof(unsigned int), &n);
+ 
+    // Execute the kernel over the entire range of the data set 
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalSize, &localSize,
+                                                              0, NULL, NULL);
+ 
+    // Wait for the command queue to get serviced before reading back results
+    clFinish(queue);
+
+    // Read the results from the device
+    clEnqueueReadBuffer(queue, d_c, CL_TRUE, 0,
+                                bytes, h_c, 0, NULL, NULL );
+}
+
 
 void add(tensor * out, tensor * in_x, tensor * in_y)
 {
