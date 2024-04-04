@@ -337,7 +337,7 @@ void cl_add(tensor* out, tensor* x, tensor* y) {
     context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
  
     // Create a command queue
-    queue = clCreateCommandQueue(context, device_id, 0, &err);
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
 
     // read kernel file
     FILE *f = fopen("nnlib.cl","r");
