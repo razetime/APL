@@ -6,8 +6,8 @@ OBJS = nnlib.o
 
 
 mobilenetTest: mobilenet.cpp ${OBJS}
-	${CXX} ${CXXFLAGS} ${INC} -o $@ $^
+	LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/ ${CXX} ${CXXFLAGS} ${INC} -o $@ $^ -lOpenCL
 ${OBJS}: ../nnlib.c
-	${CXX} -c $< ${CXXFLAGS} 
+	LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/ ${CXX} -c $< ${CXXFLAGS} 
 clean:
 	rm -f mobilenetTest *.o *.out
