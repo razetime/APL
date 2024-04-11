@@ -11,10 +11,13 @@ extern "C" {
 #include <assert.h>
 #include <math.h>
 #include <float.h>  //max_pool
+#include <iostream>
 
 #define DEBUG_TIME
 #define im2colxGEMM
 
+#define INSTEPS (512*512*512)
+#define ITERS (262144)
 struct tensor
 {
     int n;
@@ -33,6 +36,89 @@ tensor T[512];
 //float y;
 //float bias, epsilon;
 //int padding, stride, groups, size;
+
+const char *getErrorString(cl_int error)
+{
+switch(error){
+    // run-time and JIT compiler errors
+    case 0: return "CL_SUCCESS";
+    case -1: return "CL_DEVICE_NOT_FOUND";
+    case -2: return "CL_DEVICE_NOT_AVAILABLE";
+    case -3: return "CL_COMPILER_NOT_AVAILABLE";
+    case -4: return "CL_MEM_OBJECT_ALLOCATION_FAILURE";
+    case -5: return "CL_OUT_OF_RESOURCES";
+    case -6: return "CL_OUT_OF_HOST_MEMORY";
+    case -7: return "CL_PROFILING_INFO_NOT_AVAILABLE";
+    case -8: return "CL_MEM_COPY_OVERLAP";
+    case -9: return "CL_IMAGE_FORMAT_MISMATCH";
+    case -10: return "CL_IMAGE_FORMAT_NOT_SUPPORTED";
+    case -11: return "CL_BUILD_PROGRAM_FAILURE";
+    case -12: return "CL_MAP_FAILURE";
+    case -13: return "CL_MISALIGNED_SUB_BUFFER_OFFSET";
+    case -14: return "CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST";
+    case -15: return "CL_COMPILE_PROGRAM_FAILURE";
+    case -16: return "CL_LINKER_NOT_AVAILABLE";
+    case -17: return "CL_LINK_PROGRAM_FAILURE";
+    case -18: return "CL_DEVICE_PARTITION_FAILED";
+    case -19: return "CL_KERNEL_ARG_INFO_NOT_AVAILABLE";
+
+    // compile-time errors
+    case -30: return "CL_INVALID_VALUE";
+    case -31: return "CL_INVALID_DEVICE_TYPE";
+    case -32: return "CL_INVALID_PLATFORM";
+    case -33: return "CL_INVALID_DEVICE";
+    case -34: return "CL_INVALID_CONTEXT";
+    case -35: return "CL_INVALID_QUEUE_PROPERTIES";
+    case -36: return "CL_INVALID_COMMAND_QUEUE";
+    case -37: return "CL_INVALID_HOST_PTR";
+    case -38: return "CL_INVALID_MEM_OBJECT";
+    case -39: return "CL_INVALID_IMAGE_FORMAT_DESCRIPTOR";
+    case -40: return "CL_INVALID_IMAGE_SIZE";
+    case -41: return "CL_INVALID_SAMPLER";
+    case -42: return "CL_INVALID_BINARY";
+    case -43: return "CL_INVALID_BUILD_OPTIONS";
+    case -44: return "CL_INVALID_PROGRAM";
+    case -45: return "CL_INVALID_PROGRAM_EXECUTABLE";
+    case -46: return "CL_INVALID_KERNEL_NAME";
+    case -47: return "CL_INVALID_KERNEL_DEFINITION";
+    case -48: return "CL_INVALID_KERNEL";
+    case -49: return "CL_INVALID_ARG_INDEX";
+    case -50: return "CL_INVALID_ARG_VALUE";
+    case -51: return "CL_INVALID_ARG_SIZE";
+    case -52: return "CL_INVALID_KERNEL_ARGS";
+    case -53: return "CL_INVALID_WORK_DIMENSION";
+    case -54: return "CL_INVALID_WORK_GROUP_SIZE";
+    case -55: return "CL_INVALID_WORK_ITEM_SIZE";
+    case -56: return "CL_INVALID_GLOBAL_OFFSET";
+    case -57: return "CL_INVALID_EVENT_WAIT_LIST";
+    case -58: return "CL_INVALID_EVENT";
+    case -59: return "CL_INVALID_OPERATION";
+    case -60: return "CL_INVALID_GL_OBJECT";
+    case -61: return "CL_INVALID_BUFFER_SIZE";
+    case -62: return "CL_INVALID_MIP_LEVEL";
+    case -63: return "CL_INVALID_GLOBAL_WORK_SIZE";
+    case -64: return "CL_INVALID_PROPERTY";
+    case -65: return "CL_INVALID_IMAGE_DESCRIPTOR";
+    case -66: return "CL_INVALID_COMPILER_OPTIONS";
+    case -67: return "CL_INVALID_LINKER_OPTIONS";
+    case -68: return "CL_INVALID_DEVICE_PARTITION_COUNT";
+
+    // extension errors
+    case -1000: return "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR";
+    case -1001: return "CL_PLATFORM_NOT_FOUND_KHR";
+    case -1002: return "CL_INVALID_D3D10_DEVICE_KHR";
+    case -1003: return "CL_INVALID_D3D10_RESOURCE_KHR";
+    case -1004: return "CL_D3D10_RESOURCE_ALREADY_ACQUIRED_KHR";
+    case -1005: return "CL_D3D10_RESOURCE_NOT_ACQUIRED_KHR";
+    default: return "Unknown OpenCL error";
+    }
+}
+
+void cherr(cl_int err) {
+    if(err != CL_SUCCESS)
+      std::cerr << getErrorString(err) << std::endl;
+}
+
 
 float im2col_get_pixel(tensor * im, int height, int width, int channels,
         int row, int col, int channel, int pad)
@@ -251,17 +337,17 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
     int n = in_y->w;
     out = make_tensor(out, 0, 0, m, n);
 
-    cl_mem d_a;
-    cl_mem d_b;
-    cl_mem d_c;
+    cl_mem d_x;
+    cl_mem d_y;
+    cl_mem d_out;
     cl_platform_id cpPlatform;        // OpenCL platform
     cl_device_id device_id;           // device ID
     cl_context context;               // context
     cl_command_queue queue;           // command queue
     cl_program program;               // program
     cl_kernel kernel;                 // kernel
-    unsigned int n = 100000;
-    size_t bytes = x->size*sizeof(float);
+//    unsigned int n = 100000;
+    //size_t bytes = x->size*sizeof(float);
     int nsteps = INSTEPS;
     int niters = ITERS;
     size_t globalSize, localSize;
@@ -270,19 +356,20 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
     globalSize = nsteps/niters;
     err = clGetPlatformIDs(1, &cpPlatform, NULL);
     err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+    cherr(err);
     context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
     queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
     program = clCreateProgramWithSource(context, 1,
                             (const char **) &mmul_buf, NULL, &err);
     clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
     kernel = clCreateKernel(program, "matmul", &err);
-    d_x = clCreateBuffer(context, CL_MEM_READ_ONLY, x->size*sizeof(float), NULL, NULL);
-    d_y = clCreateBuffer(context, CL_MEM_READ_ONLY, y->size*sizeof(float), NULL, NULL);
+    d_x = clCreateBuffer(context, CL_MEM_READ_ONLY, in_x->size*sizeof(float), NULL, NULL);
+    d_y = clCreateBuffer(context, CL_MEM_READ_ONLY, in_y->size*sizeof(float), NULL, NULL);
     d_out = clCreateBuffer(context, CL_MEM_WRITE_ONLY, out->size*sizeof(float), NULL, NULL);
     err = clEnqueueWriteBuffer(queue, d_x, CL_TRUE, 0,
-                                   bytes, x->data, 0, NULL, NULL);
+                                   in_x->size*sizeof(float), in_x->data, 0, NULL, NULL);
     err |= clEnqueueWriteBuffer(queue, d_y, CL_TRUE, 0,
-                                   bytes, y->data, 0, NULL, NULL);
+                                   in_y->size*sizeof(float), in_y->data, 0, NULL, NULL);
                                    
     err  = clSetKernelArg(kernel, 0, sizeof(int), &m);
     err  = clSetKernelArg(kernel, 1, sizeof(int), &n);
@@ -291,17 +378,20 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
     err |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &d_y);
     err |= clSetKernelArg(kernel, 5, sizeof(cl_mem), &d_out);
  
-    // // Execute the kernel over the entire range of the data set 
-    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalSize, &localSize,
-                                                              0, NULL, NULL);
+    // Execute the kernel over the entire range of the data set
+    const int TS = 32;
+  const size_t local[2] = { TS, TS };
+  const size_t global[2] = { m, n };
+    //err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, global, local,
+    //                                                          0, NULL, NULL);
  
     // Wait for the command queue to get serviced before reading back results
-    clFinish(queue);
+    // clFinish(queue);
 
 
     // Read the results from the device
-    clEnqueueReadBuffer(queue, d_c, CL_TRUE, 0,
-                                out->size*sizeof(float), out->data, 0, NULL, NULL );
+    //clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
+    //                            out->size*sizeof(float), out->data, 0, NULL, NULL );
 
 
 
@@ -358,8 +448,6 @@ void mul(tensor * out, tensor * in_x, float value)
 #endif
 }
 
-#define INSTEPS (512*512*512)
-#define ITERS (262144)
 
 // https://www.olcf.ornl.gov/tutorials/opencl-vector-addition/
 const char* add_pbuf = "\n" \
@@ -448,6 +536,14 @@ void cl_add(tensor* out, tensor* x, tensor* y) {
     // Read the results from the device
     clEnqueueReadBuffer(queue, d_c, CL_TRUE, 0,
                                 bytes, out->data, 0, NULL, NULL );
+    
+    clReleaseMemObject(d_a);
+    clReleaseMemObject(d_b);
+    clReleaseMemObject(d_c);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
 }
 
 
