@@ -2056,7 +2056,8 @@ const char* bn_buf = "\n" \
 "                          const __global float* offset,\n" \
 "                          const __global float* scale,\n" \
 "                          const float epsilon) {\n" \
-"	for (int B = 0; B < x_n; B++)\n" \
+"	int B = get_global_id(0);" \
+"   if(B < x_n)\n" \
 "		for (int C = 0; C < x_c; C++)\n" \
 "			for (int H = 0; H < x_h; H++)\n" \
 "				for (int W = 0; W < x_w; W++)\n" \
@@ -2078,16 +2079,16 @@ void batch_normalization(tensor * out, tensor * in_x, tensor * mean, tensor * va
 
     out = make_tensor(out, in_x->n, in_x->c, in_x->h, in_x->w);
 
-	for (int B = 0; B < in_x->n; B++)
-		for (int C = 0; C < in_x->c; C++)
-			for (int H = 0; H < in_x->h; H++)
-				for (int W = 0; W < in_x->w; W++)
-				{
-					int out_index = B * out->c * out->h * out->w + C * out->h * out->w + H * out->w + W;
-					int in_index  = B * in_x->c * in_x->h * in_x->w + C * in_x->h * in_x->w + H * in_x->w + W;
-					out->data[out_index] = (in_x->data[in_index] - mean->data[C]) / sqrt(variance->data[C] + epsilon);
-					out->data[out_index] = scale->data[C] * out->data[out_index] + offset->data[C];
-				}
+	// for (int B = 0; B < in_x->n; B++)
+	// 	for (int C = 0; C < in_x->c; C++)
+	// 		for (int H = 0; H < in_x->h; H++)
+	// 			for (int W = 0; W < in_x->w; W++)
+	// 			{
+	// 				int out_index = B * out->c * out->h * out->w + C * out->h * out->w + H * out->w + W;
+	// 				int in_index  = B * in_x->c * in_x->h * in_x->w + C * in_x->h * in_x->w + H * in_x->w + W;
+	// 				out->data[out_index] = (in_x->data[in_index] - mean->data[C]) / sqrt(variance->data[C] + epsilon);
+	// 				out->data[out_index] = scale->data[C] * out->data[out_index] + offset->data[C];
+	// 			}
 
     cl_mem d_out;
     cl_mem d_x;
