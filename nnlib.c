@@ -302,15 +302,19 @@ const char* mmul_buf = "\n" \
 "                      const __global float* B,\n" \
 "                      __global float* C) {\n" \
 "    \n" \
-"    const int globalRow = get_global_id(0); // Row ID of C (0..M)\n" \
-"    const int globalCol = get_global_id(1); // Col ID of C (0..N)\n" \
+"    const int j = get_global_id(0); // Row ID of C (0..M)\n" \
 " \n" \
-"    float acc = 0.0f;\n" \
-"    for (int k=0; k<K; k++) {\n" \
-"        acc += A[k*M + globalRow] * B[globalCol*K + k];\n" \
-"    }\n" \
+"    if(j<N) {"
+"       for(int i=0; i<M; i++) {\n" \
+"       //for(int j=0; j<N; j++) {\n" \
+"           float acc = 0.0f;\n" \
+"           for (int k=0; k<K; k++) {\n" \
+"               acc += A[i*K + k] * B[k*N + j];\n" \
+"           }\n" \
+"           C[i*M + j] = acc;\n" \
+"       }\n" \
+"   }\n" \
 " \n" \
-"    C[globalCol*M + globalRow] = acc;\n" \
 "}\n" \
 "\n";
 void matmul(tensor * out, tensor * in_x, tensor * in_y)
@@ -318,8 +322,14 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
 #ifdef DEBUG_TIME
     double start = clock();
 #endif
-    // // [m*p][p*m] = [m*n]
-    // for (int i=0; i < m; i++)
+    int m = in_x->h;
+    int n = in_y->w; 
+    int p = in_x->w;
+
+    // printf("m: %i n: %i\n",m,n);
+    out = make_tensor(out, 0, 0, m, n);
+    // [m*p][p*n] = [m*n]
+    //for (int i=0; i < m; i++)
     // {
     //     for (int j=0; j < n; j++)
     //     {
@@ -332,10 +342,6 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
     //     }
     // }
 
-    int m = in_x->h; 
-    int p = in_x->w;
-    int n = in_y->w;
-    out = make_tensor(out, 0, 0, m, n);
 
     cl_mem d_x;
     cl_mem d_y;
@@ -346,8 +352,6 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
     cl_command_queue queue;           // command queue
     cl_program program;               // program
     cl_kernel kernel;                 // kernel
-//    unsigned int n = 100000;
-    //size_t bytes = x->size*sizeof(float);
     int nsteps = INSTEPS;
     int niters = ITERS;
     size_t globalSize, localSize;
@@ -377,23 +381,46 @@ void matmul(tensor * out, tensor * in_x, tensor * in_y)
     err  = clSetKernelArg(kernel, 3, sizeof(cl_mem), &d_x);
     err |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &d_y);
     err |= clSetKernelArg(kernel, 5, sizeof(cl_mem), &d_out);
+
+    cherr(err);
  
     // Execute the kernel over the entire range of the data set
-    const int TS = 32;
-  const size_t local[2] = { TS, TS };
-  const size_t global[2] = { m, n };
-    //err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, global, local,
-    //                                                          0, NULL, NULL);
+    const int TS = 64;
+    const size_t local[2] = { TS, TS };
+    const size_t global = 1024;
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global, local,
+                                                              0, NULL, NULL);
+
+    cherr(err);
  
     // Wait for the command queue to get serviced before reading back results
-    // clFinish(queue);
+     clFinish(queue);
 
 
     // Read the results from the device
-    //clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
-    //                            out->size*sizeof(float), out->data, 0, NULL, NULL );
+    clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
+                               out->size*sizeof(float), out->data, 0, NULL, NULL );
 
+    clReleaseMemObject(d_x);
+    clReleaseMemObject(d_y);
+    clReleaseMemObject(d_out);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
 
+    // for (int i=0; i < m; i++)
+    // {
+    //     for (int j=0; j < n; j++)
+    //     {
+    //         float sum = 0.0;
+    //         for(int k = 0; k < p; k++)
+    //         {
+    //             sum += in_x->data[where_pos2(in_x, i, k)] * in_y->data[where_pos2(in_y, k, j)];
+    //         }
+    //         if (j < 5 && out->data[where_pos2(out, i, j)] != sum) printf("mismatch %i %i sum %f out %f\n", i, j, sum,out->data[where_pos2(out, i, j)]); 
+    //     }
+    // }
 
 #ifdef DEBUG_TIME
         double end = clock();
@@ -546,6 +573,120 @@ void cl_add(tensor* out, tensor* x, tensor* y) {
     clReleaseContext(context);
 }
 
+const char* badd_pbuf = "\n" \
+"kernel void batch_add(__global float* x, __global float* y, __global float* out,\n" \
+"                       const unsigned int channel,\n" \
+"                       const unsigned int x_w,\n" \
+"                       const unsigned int x_h,\n" \
+"                       const unsigned int o_w,\n" \
+"                       const unsigned int o_h) {\n" \
+"    int ch = get_global_id(0);\n" \
+"    if(ch<channel) {\n" \
+"        float bvalue = y[ch];\n" \
+"        for(int h = 0; h < x_h; h++)\n" \
+"        {\n" \
+"            for(int w = 0; w < x_w; w++)\n" \
+"            {\n" \
+"                out[ch * o_h * o_w + h * o_w + w] = x[ch * x_h * x_w + h * x_w + w] + bvalue;\n" \
+"            }\n" \
+"        }\n" \
+"    }\n" \
+"}\n" \
+"\n";
+
+void cl_batch_add(tensor* out, tensor* x, tensor* y) {
+    out = make_tensor(out, x->n, x->c, x->h, x->w);
+
+    // Device input buffers
+    cl_mem d_x;
+    cl_mem d_y;
+    // Device output buffer
+    cl_mem d_out;
+ 
+    cl_platform_id cpPlatform;        // OpenCL platform
+    cl_device_id device_id;           // device ID
+    cl_context context;               // context
+    cl_command_queue queue;           // command queue
+    cl_program program;               // program
+    cl_kernel kernel;                 // kernel
+
+    unsigned int n = 100000;
+    size_t bytes = x->size*sizeof(float);
+
+    int nsteps = INSTEPS;
+    int niters = ITERS;
+    size_t globalSize, localSize;
+    cl_int err;
+
+    // Number of work items in each local work group
+    localSize = 64;
+ 
+    globalSize = nsteps/niters;
+
+    // Bind to platform
+    err = clGetPlatformIDs(1, &cpPlatform, NULL);
+ 
+    // Get ID for the device
+    err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+ 
+    // Create a context 
+    context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+ 
+    // Create a command queue
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
+
+    program = clCreateProgramWithSource(context, 1,
+                            (const char **) &badd_pbuf, NULL, &err);
+ 
+    // Build the program executable
+    clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+ 
+    // Create the compute kernel in the program we wish to run
+    kernel = clCreateKernel(program, "batch_add", &err);
+    cherr(err);
+
+    // Create the input and output arrays in device memory for our calculation
+    d_x = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
+    d_y = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
+    d_out = clCreateBuffer(context, CL_MEM_WRITE_ONLY, bytes, NULL, NULL);
+ 
+    // Write our data set into the input array in device memory
+    err = clEnqueueWriteBuffer(queue, d_x, CL_TRUE, 0,
+                                   bytes, x->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_y, CL_TRUE, 0,
+                                   bytes, y->data, 0, NULL, NULL);
+ 
+    // Set the arguments to our compute kernel
+    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_x);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_y);
+    err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &d_out);
+    err |= clSetKernelArg(kernel, 3, sizeof(unsigned int), &x->c);
+    err |= clSetKernelArg(kernel, 4, sizeof(unsigned int), &x->w);
+    err |= clSetKernelArg(kernel, 5, sizeof(unsigned int), &x->h);
+    err |= clSetKernelArg(kernel, 6, sizeof(unsigned int), &out->w);
+    err |= clSetKernelArg(kernel, 7, sizeof(unsigned int), &out->h);
+ 
+    // Execute the kernel over the entire range of the data set 
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalSize, &localSize,
+                                                              0, NULL, NULL);
+
+ 
+    // Wait for the command queue to get serviced before reading back results
+    clFinish(queue);
+
+
+    // Read the results from the device
+    clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
+                                bytes, out->data, 0, NULL, NULL );
+    
+    clReleaseMemObject(d_x);
+    clReleaseMemObject(d_y);
+    clReleaseMemObject(d_out);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+}
 
 void add(tensor * out, tensor * in_x, tensor * in_y)
 {
@@ -557,39 +698,58 @@ void add(tensor * out, tensor * in_x, tensor * in_y)
     // Note : that there may be problems with different shapes
 	if (in_x->dim == in_y->dim)
 	{
-		for (int i = 0; i < out->size; i++)
-			out->data[i] = in_x->data[i] + in_y->data[i];
-        // cl_add(out, in_x, in_y);
+		// for (int i = 0; i < out->size; i++)
+		// 	out->data[i] = in_x->data[i] + in_y->data[i];
+        cl_add(out, in_x, in_y);
 	}
 	else if ((in_x->dim == 4) &&  (in_y->dim == 2))
 	{
-		int a_batch = in_x->n;
-		int a_channel = in_x->c;
-		int a_h = in_x->h;
-		int a_w = in_x->w;
+        cl_batch_add(out, in_x, in_y);
+		// int a_batch = in_x->n;
+		// int a_channel = in_x->c;
+		// int a_h = in_x->h;
+		// int a_w = in_x->w;
 
-		int b_batch = in_y->h;
-		int b_channel = in_y->w;
-		assert(a_channel == b_channel);
+		// int b_batch = in_y->h;
+		// int b_channel = in_y->w;
+		// assert(a_channel == b_channel);
 		
-		float bvalue = 0;
-		for(int ch = 0; ch< a_channel; ch++)
-		{
-			bvalue = in_y->data[ch];
-			for(int h = 0; h < a_h; h++)
-			{
-				for(int w = 0; w < a_w; w++)
-				{
-					out->data[ch * out->h * out->w + h * out->w + w] = in_x->data[ch * in_x->h * in_x->w + h * in_x->w + w] + bvalue;
-				}
-			}
-		}
+		// float bvalue = 0;
+		// for(int ch = 0; ch< a_channel; ch++)
+		// {
+		// 	bvalue = in_y->data[ch];
+		// 	for(int h = 0; h < a_h; h++)
+		// 	{
+		// 		for(int w = 0; w < a_w; w++)
+		// 		{
+		// 			out->data[ch * out->h * out->w + h * out->w + w] = in_x->data[ch * in_x->h * in_x->w + h * in_x->w + w] + bvalue;
+		// 		}
+		// 	}
+		// }
 	}
 #ifdef DEBUG_TIME
         double end = clock();
         printf("[add time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
 #endif
 }
+
+const char* soft_buf = "\n" \
+  "kernel void softmax(__global float* x, __global float* out,\n" \
+  "                      const unsigned int n) {              \n" \
+  "    int a = get_global_id(0);\n" \
+  "    if (a != 0) return;\n" \
+  "    float sum = 0.0f;\n" \
+  "    for (int i = 0; i < n; i++)\n" \
+  "    {\n" \
+  "        out[i] = exp(x[i]);\n" \
+  "        sum = sum + out[i];\n" \
+  "    }\n" \
+  "\n" \
+  "    for (int i = 0; i < n; i++) {\n" \
+  "        out[i] = out[i] / sum;\n" \
+  "    }\n" \
+  "}\n" \
+  "\n";
 
 void softmax(tensor * out, tensor * in_x)
 {
@@ -598,18 +758,109 @@ void softmax(tensor * out, tensor * in_x)
 #endif
 
     make_tensor(out, in_x->n, in_x->c, in_x->h, in_x->w);
-    float sum = 0;
+    cl_mem d_x;
+    cl_mem d_out;
+ 
+    cl_platform_id cpPlatform;        // OpenCL platform
+    cl_device_id device_id;           // device ID
+    cl_context context;               // context
+    cl_command_queue queue;           // command queue
+    cl_program program;               // program
+    cl_kernel kernel;                 // kernel
 
-    for (int i = 0; i < out->size; i++)
-    {
-        out->data[i] = expf(in_x->data[i]);
-        sum = sum + out->data[i];
-    }
+    size_t bytes = in_x->size*sizeof(float);
 
-    assert(sum != 0);
+    int nsteps = INSTEPS;
+    int niters = ITERS;
+    size_t globalSize, localSize;
+    cl_int err;
 
-    for (int i = 0; i < out->size; i++)
-        out->data[i] = out->data[i] / sum;
+    // Number of work items in each local work group
+    localSize = 64;
+ 
+    globalSize = 1024;
+
+    // Bind to platform
+    err = clGetPlatformIDs(1, &cpPlatform, NULL);
+ 
+    // Get ID for the device
+    err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+ 
+    // Create a context 
+    context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+ 
+    // Create a command queue
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
+
+    program = clCreateProgramWithSource(context, 1,
+                            (const char **) &soft_buf, NULL, &err);
+ 
+    // Build the program executable
+    err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    cherr(err);
+
+    // size_t len=0;
+    // err = clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG,
+    // 0, NULL, &len);
+    // char* buf = (char*)calloc(len, sizeof(char));
+    // err = clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG,
+    // len, buf, NULL);
+    // printf("Log:\n%s\n",buf);
+ 
+    // Create the compute kernel in the program we wish to run
+    kernel = clCreateKernel(program, "softmax", &err);
+
+    // Create the input and output arrays in device memory for our calculation
+    d_x = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
+    d_out = clCreateBuffer(context, CL_MEM_WRITE_ONLY, bytes, NULL, NULL);
+ 
+    // Write our data set into the input array in device memory
+    err = clEnqueueWriteBuffer(queue, d_x, CL_TRUE, 0,
+                                   bytes, in_x->data, 0, NULL, NULL);
+ 
+    // Set the arguments to our compute kernel
+    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_x);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_out);
+    err |= clSetKernelArg(kernel, 2, sizeof(unsigned int), &in_x->size);
+ 
+    // Execute the kernel over the entire range of the data set 
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalSize, &localSize,
+                                                              0, NULL, NULL);
+ 
+    // Wait for the command queue to get serviced before reading back results
+    clFinish(queue);
+
+
+    // Read the results from the device
+    err = clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
+                                bytes, out->data, 0, NULL, NULL );
+    cherr(err);
+    
+    clReleaseMemObject(d_x);
+    clReleaseMemObject(d_out);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+    // tensor* tout = (tensor*)malloc(sizeof(tensor));
+    // make_tensor(tout, in_x->n, in_x->c, in_x->h, in_x->w);
+    // float sum = 0;
+
+    // for (int i = 0; i < tout->size; i++)
+    // {
+    //     tout->data[i] = expf(in_x->data[i]);
+    //     // printf("to %f\n",tout->data[i]);
+    //     sum = sum + tout->data[i];
+    // }
+    // // printf("sum %f\n",sum);
+    // assert(sum != 0);
+
+    // for (int i = 0; i < tout->size; i++)
+    //     tout->data[i] = tout->data[i] / sum;
+
+    // for (int i = 0; i < tout->size; i++) {
+    //     printf("data %i %f %f\n",i, tout->data[i], out->data[i]);
+    // }
 
 #ifdef DEBUG_TIME
     double end = clock();
@@ -702,9 +953,9 @@ void reshape(tensor * out, tensor * in_x, int n, int c, int h, int w)
 
 void concat(tensor * out, tensor * in_x, tensor * in_y, int axis)
 {
-#ifdef DEBUG_TIME
-    double start = clock();
-#endif
+    #ifdef DEBUG_TIME
+        double start = clock();
+    #endif
 
     //1-D
     //Chack
@@ -770,17 +1021,17 @@ void concat(tensor * out, tensor * in_x, tensor * in_y, int axis)
             cnt++;
         }
     }
-#ifdef DEBUG_TIME
-    double end = clock();
-    printf("[concat time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
-#endif
+    #ifdef DEBUG_TIME
+        double end = clock();
+        printf("[concat time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
+    #endif
 }
 
 void squeeze(tensor * out, tensor * in_x, int n, int c, int h, int w)
 {
-#ifdef DEBUG_TIME
-    double start = clock();
-#endif
+    #ifdef DEBUG_TIME
+        double start = clock();
+    #endif
 
     make_tensor(out, in_x->n, in_x->c, in_x->h, in_x->w);
 
@@ -843,17 +1094,17 @@ void squeeze(tensor * out, tensor * in_x, int n, int c, int h, int w)
     for (int i = 0; i < in_x->size; i++)
         out->data[i] = in_x->data[i];
 
-#ifdef DEBUG_TIME
-    double end = clock();
-    printf("[squeeze time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
-#endif
+    #ifdef DEBUG_TIME
+        double end = clock();
+        printf("[squeeze time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
+    #endif
 }
 
 void transpose(tensor * out, tensor * in_x, int n, int c, int h, int w)
 {
-#ifdef DEBUG_TIME
-    double start = clock();
-#endif
+    #ifdef DEBUG_TIME
+        double start = clock();
+    #endif
 
     make_tensor(out, in_x->n, in_x->c, in_x->h, in_x->w);
 
@@ -905,11 +1156,57 @@ void transpose(tensor * out, tensor * in_x, int n, int c, int h, int w)
 
     }
 
-#ifdef DEBUG_TIME
-    double end = clock();
-    printf("[transpose time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
-#endif
+    #ifdef DEBUG_TIME
+        double end = clock();
+        printf("[transpose time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
+    #endif
 }
+
+const char* conv_buf = "\n" \
+"kernel void conv(__global float* out, __global float* x,\n" \
+"                __global float* filter, __global float* bias,\n" \
+"                const int stride, const int vb_height,\n" \
+"                const int vb_weight, const int v_offset_X,\n" \
+"                const int v_offset_Y, const int x_c, const int x_h,\n" \
+"                const int x_w, const int f_c, const int f_h, const int f_w,\n" \
+"                const int inPic, const int filterKernelNum, const int o_c,\n" \
+"                const int o_h, const int o_w, const int v_width,\n" \
+"                const int v_height,const int vb_width) {\n" \
+"    int pic = get_global_id(0);\n" \
+"    // for (int pic = 0; pic < inPic; pic++)\n" \
+"    if(pic<inPic) {\n" \
+"    {\n" \
+"        for (int filterKernel = 0; filterKernel < filterKernelNum; filterKernel++)// 32\n" \
+"        {\n" \
+"            for (int height = 0; height < o_h; height = height + 1)//28\n" \
+"            {\n" \
+"                for (int width = 0; width < o_w; width = width + 1)//28\n" \
+"                {\n" \
+"                    float featureValue = 0;\n" \
+"                    int offsetY = (height * stride);\n" \
+"                    int offsetX = (width  * stride);\n" \
+"\n" \
+"                    for (int z = 0; z < f_c; z++)\n" \
+"                    {\n" \
+"                        for (int y = 0; y < f_h; y++)\n" \
+"                        {\n" \
+"                             for (int x = 0; x < f_w; x++)\n" \
+"                             {\n" \
+"                                // logical_height, logical_weight\n" \
+"                                int l_height = y + offsetY;\n" \
+"                                int l_weight = x + offsetX;\n" \
+"\n" \
+"                                if ((l_height >= v_height && l_weight >= v_width) && (l_height < vb_height && l_weight < vb_width))\n" \
+"                                    featureValue = featureValue + x[pic * x_c * x_h * x_w + z * x_h * x_w + (l_height - v_offset_Y) * x_w + (l_weight - v_offset_X)] * filter[filterKernel * f_c * f_h * f_w + z * f_h * f_w + y * f_w + x];\n" \
+"                            }\n" \
+"                        }\n" \
+"                    }\n" \
+"                    out[pic * o_c * o_h * o_w + filterKernel * o_h * o_w + height * o_w + width] = featureValue + bias[filterKernel];\n" \
+"                }\n" \
+"            }\n" \
+"        }\n" \
+"    }\n" \
+"}\n" ;
 
 void conv(tensor * out, tensor * in_x, tensor * filter, tensor * bias, int padding, int stride, int groups)
 {
@@ -974,6 +1271,7 @@ void conv(tensor * out, tensor * in_x, tensor * filter, tensor * bias, int paddi
 
     make_tensor(out, out->n, out->c, out->h, out->w);
 
+/*
 #ifdef im2colxGEMM
 
     int out_w,out_h;
@@ -1031,6 +1329,8 @@ void conv(tensor * out, tensor * in_x, tensor * filter, tensor * bias, int paddi
         free(colD);
     }
 #else    
+*/
+/*
     for (int Pic = 0; Pic < inPic; Pic++)
     {
         for (int filterKernel = 0; filterKernel < filterKernelNum; filterKernel++)// 32
@@ -1063,7 +1363,96 @@ void conv(tensor * out, tensor * in_x, tensor * filter, tensor * bias, int paddi
             }
         }
     }
-#endif    
+*/
+
+    cl_mem d_out;
+    cl_mem d_x;
+    cl_mem d_filter;
+    cl_mem d_bias;
+    cl_platform_id cpPlatform;        // OpenCL platform
+    cl_device_id device_id;           // device ID
+    cl_context context;               // context
+    cl_command_queue queue;           // command queue
+    cl_program program;               // program
+    cl_kernel kernel;                 // kernel
+    int nsteps = INSTEPS;
+    int niters = ITERS;
+    size_t globalSize, localSize;
+    cl_int err;
+    localSize = 64;
+    err = clGetPlatformIDs(1, &cpPlatform, NULL);
+    err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+    cherr(err);
+    context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
+    program = clCreateProgramWithSource(context, 1,
+                            (const char **) &mmul_buf, NULL, &err);
+    clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    kernel = clCreateKernel(program, "conv", &err);
+    d_out = clCreateBuffer(context, CL_MEM_WRITE_ONLY, out->size*sizeof(float), NULL, NULL);
+    d_x = clCreateBuffer(context, CL_MEM_READ_ONLY, in_x->size*sizeof(float), NULL, NULL);
+    d_filter = clCreateBuffer(context, CL_MEM_READ_ONLY, filter->size*sizeof(float), NULL, NULL);
+    d_bias = clCreateBuffer(context, CL_MEM_READ_ONLY, bias->size*sizeof(float), NULL, NULL);
+
+    err = clEnqueueWriteBuffer(queue, d_out, CL_TRUE, 0,
+                                   out->size*sizeof(float), out->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_x, CL_TRUE, 0,
+                                   in_x->size*sizeof(float), in_x->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_filter, CL_TRUE, 0,
+                                   filter->size*sizeof(float), filter->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_bias, CL_TRUE, 0,
+                                   bias->size*sizeof(float), bias->data, 0, NULL, NULL);
+                                   
+    err  = clSetKernelArg(kernel, 0 , sizeof(cl_mem), &d_out);
+    err |= clSetKernelArg(kernel, 1 , sizeof(cl_mem), &d_x);
+    err |= clSetKernelArg(kernel, 2 , sizeof(cl_mem), &d_filter);
+    err |= clSetKernelArg(kernel, 3 , sizeof(cl_mem), &d_bias);
+    err |= clSetKernelArg(kernel, 4 , sizeof(int),    &stride);
+    err |= clSetKernelArg(kernel, 5 , sizeof(int),    &vb_height);
+    err |= clSetKernelArg(kernel, 6 , sizeof(int),    &v_offset_X);
+    err |= clSetKernelArg(kernel, 7 , sizeof(int),    &v_offset_Y);
+    err |= clSetKernelArg(kernel, 8 , sizeof(int),    &in_x->c);
+    err |= clSetKernelArg(kernel, 9 , sizeof(int),    &in_x->h);
+    err |= clSetKernelArg(kernel, 10, sizeof(int),    &in_x->w);
+    err |= clSetKernelArg(kernel, 11, sizeof(int),    &filter->c);
+    err |= clSetKernelArg(kernel, 12, sizeof(int),    &filter->h);
+    err |= clSetKernelArg(kernel, 13, sizeof(int),    &filter->w);
+    err |= clSetKernelArg(kernel, 14, sizeof(int),    &inPic);
+    err |= clSetKernelArg(kernel, 15, sizeof(int),    &filterKernelNum);
+    err |= clSetKernelArg(kernel, 16, sizeof(int),    &out->c);
+    err |= clSetKernelArg(kernel, 17, sizeof(int),    &out->h);
+    err |= clSetKernelArg(kernel, 18, sizeof(int),    &out->w);
+    err |= clSetKernelArg(kernel, 19, sizeof(int),    &v_width);
+    err |= clSetKernelArg(kernel, 20, sizeof(int),    &v_height);
+    err |= clSetKernelArg(kernel, 21, sizeof(int),    &vb_width);
+
+    cherr(err);
+ 
+    const int TS = 64;
+    const size_t local[2] = { TS, TS };
+    const size_t global = 1024;
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global, local,
+                                                              0, NULL, NULL);
+
+    cherr(err);
+ 
+    // Wait for the command queue to get serviced before reading back results
+     clFinish(queue);
+
+
+    // Read the results from the device
+    clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
+                               out->size*sizeof(float), out->data, 0, NULL, NULL );
+
+    clReleaseMemObject(d_x);
+    clReleaseMemObject(d_out);
+    clReleaseMemObject(d_filter);
+    clReleaseMemObject(d_bias);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+// #endif    
 
 #ifdef DEBUG_TIME
     double end = clock();
@@ -1170,7 +1559,7 @@ void max_pool(tensor * out, tensor * in_x, int size, int padding, int stride)
 const char* relukernel = "\n" \
   "kernel void tensor_relu(__global float* a, __global float* out,\n" \
   "                      const unsigned int n) {                  \n" \
-  "  int id = get_global_id(1);                                   \n" \
+  "  int id = get_global_id(0);                                   \n" \
   "  if(id<n)                                                     \n" \
   "      out[id] = fmax(a[id], 0.0f);                                \n" \
   "}                                                              \n" \
@@ -1184,90 +1573,100 @@ void relu(tensor * out, tensor * in_x)
 
     make_tensor(out, in_x->n, in_x->c, in_x->h, in_x->w);
 
-    // // Device input buffers
-    // cl_mem d_a;
-    // // Device output buffer
-    // cl_mem d_c;
+    // Device input buffers
+    cl_mem d_a;
+    // Device output buffer
+    cl_mem d_c;
  
-    // cl_platform_id cpPlatform;        // OpenCL platform
-    // cl_device_id device_id;           // device ID
-    // cl_context context;               // context
-    // cl_command_queue queue;           // command queue
-    // cl_program program;               // program
-    // cl_kernel kernel;                 // kernel
+    cl_platform_id cpPlatform;        // OpenCL platform
+    cl_device_id device_id;           // device ID
+    cl_context context;               // context
+    cl_command_queue queue;           // command queue
+    cl_program program;               // program
+    cl_kernel kernel;                 // kernel
 
-    // size_t bytes = in_x->size*sizeof(float);
+    size_t bytes = in_x->size*sizeof(float);
 
-    // int nsteps = INSTEPS;
-    // int niters = ITERS;
-    // size_t globalSize, localSize;
-    // cl_int err;
+    int nsteps = INSTEPS;
+    int niters = ITERS;
+    size_t globalSize, localSize;
+    cl_int err;
 
-    // // Number of work items in each local work group
-    // localSize = 64;
+    // Number of work items in each local work group
+    localSize = 64;
  
-    // globalSize = nsteps/niters;
+    globalSize = 512*512;
 
-    // // Bind to platform
-    // err = clGetPlatformIDs(1, &cpPlatform, NULL);
+    // Bind to platform
+    err = clGetPlatformIDs(1, &cpPlatform, NULL);
  
-    // // Get ID for the device
-    // err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+    // Get ID for the device
+    err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
  
-    // // Create a context 
-    // context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+    // Create a context 
+    context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
  
-    // // Create a command queue
-    // queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
+    // Create a command queue
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
 
-    // program = clCreateProgramWithSource(context, 1,
-    //                         (const char **) &relukernel, NULL, &err);
+    program = clCreateProgramWithSource(context, 1,
+                            (const char **) &relukernel, NULL, &err);
  
-    // // Build the program executable
-    // clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    // Build the program executable
+    clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
  
-    // // Create the compute kernel in the program we wish to run
-    // kernel = clCreateKernel(program, "tensor_relu", &err);
+    // Create the compute kernel in the program we wish to run
+    kernel = clCreateKernel(program, "tensor_relu", &err);
 
-    // // Create the input and output arrays in device memory for our calculation
-    // d_a = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
-    // d_c = clCreateBuffer(context, CL_MEM_WRITE_ONLY, bytes, NULL, NULL);
+    // Create the input and output arrays in device memory for our calculation
+    d_a = clCreateBuffer(context, CL_MEM_READ_ONLY, bytes, NULL, NULL);
+    d_c = clCreateBuffer(context, CL_MEM_WRITE_ONLY, bytes, NULL, NULL);
  
-    // // Write our data set into the input array in device memory
-    // err = clEnqueueWriteBuffer(queue, d_a, CL_TRUE, 0,
-    //                                bytes, in_x->data, 0, NULL, NULL);
+    // Write our data set into the input array in device memory
+    err = clEnqueueWriteBuffer(queue, d_a, CL_TRUE, 0,
+                                   bytes, in_x->data, 0, NULL, NULL);
  
-    // // Set the arguments to our compute kernel
-    // err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_a);
-    // err  = clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_c);
-    // err |= clSetKernelArg(kernel, 2, sizeof(unsigned int), &in_x->size);
+    // Set the arguments to our compute kernel
+    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_a);
+    err  = clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_c);
+    err |= clSetKernelArg(kernel, 2, sizeof(unsigned int), &in_x->size);
  
-    // // Execute the kernel over the entire range of the data set 
-    // err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalSize, &localSize,
-    //                                                           0, NULL, NULL);
+    // Execute the kernel over the entire range of the data set 
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalSize, &localSize,
+                                                              0, NULL, NULL);
  
-    // // Wait for the command queue to get serviced before reading back results
-    // clFinish(queue);
+    // Wait for the command queue to get serviced before reading back results
+    clFinish(queue);
 
 
-    // // Read the results from the device
-    // clEnqueueReadBuffer(queue, d_c, CL_TRUE, 0,
-    //                             bytes, out->data, 0, NULL, NULL );
+    // Read the results from the device
+    err = clEnqueueReadBuffer(queue, d_c, CL_TRUE, 0,
+                                bytes, out->data, 0, NULL, NULL );
+    cherr(err);
     
     // printf("size: %i %i\n", in_x->size, out->size);
     // printf("first elem: %f %f\n", in_x->data[100], out->data[100]);
 
-    for (int i = 0; i < out->size; i++) 
-        out->data[i] = fmax(in_x->data[i], 0.0);
+    // for (int i = 0; i < out->size; i++) 
+    //     out->data[i] = fmax(in_x->data[i], 0.0);
 
 
+    // int x = 0;
     // for (int i = 0; i < out->size; i++) {
     //     float a = fmax(in_x->data[i], 0.0);
     //     if(out->data[i] != a){
-    //         printf("mismatch %f %f\n", out->data[i], a);
+    //         printf("mismatch %f %f %d\n", out->data[i], a, i);
+    //         x++;
+    //         if (x>2)break;
     //     }
     // }
     // printf("first elem: %f %f\n", in_x->data[100], out->data[100]);
+    clReleaseMemObject(d_a);
+    clReleaseMemObject(d_c);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
 
 #ifdef DEBUG_TIME
     double end = clock();
@@ -1646,6 +2045,31 @@ void convxt_bias(tensor * out, tensor * in_x, tensor * filter, tensor * bias, in
     printf("[convxbias time = %1.3f seconds, groups = %d]\n",(end-start)/CLOCKS_PER_SEC, groups);
 #endif
 }
+const char* bn_buf = "\n" \
+"__kernel void batch_norm(const int x_n, const int x_c, const int x_h,\n" \
+"                          const int x_w,\n" \
+"                          const int o_c, const int o_h, const int o_w,\n" \
+"                          __global float* out,\n" \
+"                          const __global float* x,\n" \
+"                          const __global float* mean,\n" \
+"                          const __global float* variance,\n" \
+"                          const __global float* offset,\n" \
+"                          const __global float* scale,\n" \
+"                          const float epsilon) {\n" \
+"	for (int B = 0; B < x_n; B++)\n" \
+"		for (int C = 0; C < x_c; C++)\n" \
+"			for (int H = 0; H < x_h; H++)\n" \
+"				for (int W = 0; W < x_w; W++)\n" \
+"				{\n" \
+"					int out_index = B * o_c * o_h * o_w + C * o_h * o_w + H * o_w + W;\n" \
+"					int in_index  = B * x_c * x_h * x_w + C * x_h * x_w + H * x_w + W;\n" \
+"					out[out_index] = (x[in_index] - mean[C]) / sqrt(variance[C] + epsilon);\n" \
+"					out[out_index] = scale[C] * out[out_index] + offset[C];\n" \
+"				}\n" \
+" \n" \
+"}\n" \
+"\n";
+
 void batch_normalization(tensor * out, tensor * in_x, tensor * mean, tensor * variance, tensor * offset, tensor * scale, float epsilon)
 {
 #ifdef DEBUG_TIME
@@ -1665,6 +2089,94 @@ void batch_normalization(tensor * out, tensor * in_x, tensor * mean, tensor * va
 					out->data[out_index] = scale->data[C] * out->data[out_index] + offset->data[C];
 				}
 
+    cl_mem d_out;
+    cl_mem d_x;
+    cl_mem d_mean;
+    cl_mem d_variance;
+    cl_mem d_offset;
+    cl_mem d_scale;
+    cl_platform_id cpPlatform;        // OpenCL platform
+    cl_device_id device_id;           // device ID
+    cl_context context;               // context
+    cl_command_queue queue;           // command queue
+    cl_program program;               // program
+    cl_kernel kernel;                 // kernel
+    int nsteps = INSTEPS;
+    int niters = ITERS;
+    size_t globalSize, localSize;
+    cl_int err;
+    localSize = 64;
+    err = clGetPlatformIDs(1, &cpPlatform, NULL);
+    err = clGetDeviceIDs(cpPlatform, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+    cherr(err);
+    context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
+    program = clCreateProgramWithSource(context, 1,
+                            (const char **) &mmul_buf, NULL, &err);
+    clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    kernel = clCreateKernel(program, "batch_norm", &err);
+    d_out = clCreateBuffer(context, CL_MEM_WRITE_ONLY, out->size*sizeof(float), NULL, NULL);
+    d_x = clCreateBuffer(context, CL_MEM_READ_ONLY, in_x->size*sizeof(float), NULL, NULL);
+    d_mean = clCreateBuffer(context, CL_MEM_READ_ONLY, mean->size*sizeof(float), NULL, NULL);
+    d_variance = clCreateBuffer(context, CL_MEM_READ_ONLY, variance->size*sizeof(float), NULL, NULL);
+    d_offset = clCreateBuffer(context, CL_MEM_READ_ONLY, offset->size*sizeof(float), NULL, NULL);
+    d_scale = clCreateBuffer(context, CL_MEM_READ_ONLY, scale->size*sizeof(float), NULL, NULL);
+    err = clEnqueueWriteBuffer(queue, d_out, CL_TRUE, 0,
+                                   out->size*sizeof(float), out->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_x, CL_TRUE, 0,
+                                   in_x->size*sizeof(float), in_x->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_mean, CL_TRUE, 0,
+                                   mean->size*sizeof(float), mean->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_variance, CL_TRUE, 0,
+                                   variance->size*sizeof(float), variance->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_offset, CL_TRUE, 0,
+                                   offset->size*sizeof(float), offset->data, 0, NULL, NULL);
+    err |= clEnqueueWriteBuffer(queue, d_scale, CL_TRUE, 0,
+                                   scale->size*sizeof(float), scale->data, 0, NULL, NULL);
+                                   
+    err  = clSetKernelArg(kernel, 0 , sizeof(int), &in_x->n);
+    err |= clSetKernelArg(kernel, 1 , sizeof(int), &in_x->c);
+    err |= clSetKernelArg(kernel, 2 , sizeof(int), &in_x->h);
+    err |= clSetKernelArg(kernel, 3 , sizeof(int), &in_x->w);
+    err |= clSetKernelArg(kernel, 4 , sizeof(int), &out->c);
+    err |= clSetKernelArg(kernel, 5 , sizeof(int), &out->h);
+    err |= clSetKernelArg(kernel, 6 , sizeof(int), &out->w);
+    err |= clSetKernelArg(kernel, 7 , sizeof(cl_mem), &d_out);
+    err |= clSetKernelArg(kernel, 8 , sizeof(cl_mem), &d_x);
+    err |= clSetKernelArg(kernel, 9 , sizeof(cl_mem), &d_mean);
+    err |= clSetKernelArg(kernel, 10, sizeof(cl_mem), &d_variance);
+    err |= clSetKernelArg(kernel, 11, sizeof(cl_mem), &d_offset);
+    err |= clSetKernelArg(kernel, 12, sizeof(cl_mem), &d_scale);
+    err |= clSetKernelArg(kernel, 13, sizeof(float), &epsilon);
+
+    cherr(err);
+ 
+    const int TS = 64;
+    const size_t local[2] = { TS, TS };
+    const size_t global = 1024;
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global, local,
+                                                              0, NULL, NULL);
+
+    cherr(err);
+ 
+    // Wait for the command queue to get serviced before reading back results
+     clFinish(queue);
+
+
+    // Read the results from the device
+    clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0,
+                               out->size*sizeof(float), out->data, 0, NULL, NULL );
+
+    clReleaseMemObject(d_x);
+    clReleaseMemObject(d_out);
+    clReleaseMemObject(d_mean);
+    clReleaseMemObject(d_variance);
+    clReleaseMemObject(d_offset);
+    clReleaseMemObject(d_scale);
+    clReleaseProgram(program);
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
 #ifdef DEBUG_TIME
     double end = clock();
     printf("[batch_normalization time = %1.3f seconds]\n",(end-start)/CLOCKS_PER_SEC);
